@@ -23,10 +23,10 @@ const HOOKS_DST = path.join(CLAUDE_DIR, "hooks");
 const SETTINGS = path.join(CLAUDE_DIR, "settings.json");
 
 const HOOK_FILES = [
-  "statusline-bridge.js",
-  "inject-context-on-prompt.js",
-  "inject-context-on-tool.js",
-  "session-cleanup.js",
+  "statusline-bridge.cjs",
+  "inject-context-on-prompt.cjs",
+  "inject-context-on-tool.cjs",
+  "session-cleanup.cjs",
 ];
 
 // ── Colors (works on Windows Terminal, macOS Terminal, Linux) ──────
@@ -66,17 +66,20 @@ if (FLAG === "--uninstall") {
     }
   }
 
-  // Clean temp files
+  // Clean temp files only if no Claude Code sessions are running
   const tmpDir = os.tmpdir();
+  let tempFiles;
   try {
-    for (const f of fs.readdirSync(tmpDir)) {
-      if (f.startsWith("claude-context-usage") || f.startsWith("claude-tool-counter-")) {
-        fs.unlinkSync(path.join(tmpDir, f));
-      }
-    }
-    ok("Cleaned temp files");
+    tempFiles = fs.readdirSync(tmpDir).filter(
+      (f) => f.startsWith("claude-context-usage-") || f.startsWith("claude-tool-counter-")
+    );
   } catch {
-    // Non-fatal
+    tempFiles = [];
+  }
+
+  if (tempFiles.length > 0) {
+    warn(`Found ${tempFiles.length} temp file(s) — skipping (may belong to active sessions).`);
+    warn(`  To remove manually: rm ${path.join(tmpDir, "claude-context-usage-*")} ${path.join(tmpDir, "claude-tool-counter-*")}`);
   }
 
   console.log();
@@ -134,13 +137,28 @@ if (FLAG !== "--test") {
   }
   ok(`All hook scripts found in ${HOOKS_SRC}/`);
 
-  // ── Step 3: Copy scripts ─────────────────────────────────────────
+  // ── Step 3: Copy scripts (skip existing) ──────────────────────────
   info("Step 3/5 — Installing hook scripts...");
 
   fs.mkdirSync(HOOKS_DST, { recursive: true });
   for (const f of HOOK_FILES) {
     const src = path.join(HOOKS_SRC, f);
     const dst = path.join(HOOKS_DST, f);
+
+    if (fs.existsSync(dst)) {
+      // Check if it's our file (same size) or something else
+      const srcStat = fs.statSync(src);
+      const dstStat = fs.statSync(dst);
+      if (srcStat.size === dstStat.size &&
+          fs.readFileSync(src, "utf8") === fs.readFileSync(dst, "utf8")) {
+        ok(`Already installed (identical): ${dst}`);
+      } else {
+        warn(`Skipped — file already exists and differs: ${dst}`);
+        warn(`  To update, remove it first, then re-run setup.`);
+      }
+      continue;
+    }
+
     fs.copyFileSync(src, dst);
 
     // Make executable on Unix (no-op concept on Windows, but harmless)
@@ -153,104 +171,147 @@ if (FLAG !== "--test") {
     ok(`Installed ${dst}`);
   }
 
-  // ── Step 4: Update settings.json ─────────────────────────────────
+  // ── Step 4: Update settings.json (non-destructive) ────────────────
   info("Step 4/5 — Updating settings.json...");
 
   // Build absolute paths for hook commands
-  const bridgePath = path.join(HOOKS_DST, "statusline-bridge.js");
-  const promptPath = path.join(HOOKS_DST, "inject-context-on-prompt.js");
-  const toolPath = path.join(HOOKS_DST, "inject-context-on-tool.js");
-  const cleanupPath = path.join(HOOKS_DST, "session-cleanup.js");
+  const bridgePath = path.join(HOOKS_DST, "statusline-bridge.cjs");
+  const promptPath = path.join(HOOKS_DST, "inject-context-on-prompt.cjs");
+  const toolPath = path.join(HOOKS_DST, "inject-context-on-tool.cjs");
+  const cleanupPath = path.join(HOOKS_DST, "session-cleanup.cjs");
 
-  const newConfig = {
-    statusLine: {
-      type: "command",
-      command: `node "${bridgePath}"`,
-      padding: 0,
+  // Our hook entries — each is one array element to append
+  const OUR_HOOKS = {
+    UserPromptSubmit: {
+      matcher: "",
+      hooks: [
+        {
+          type: "command",
+          command: `node "${promptPath}"`,
+          timeout: 5,
+        },
+      ],
     },
-    hooks: {
-      UserPromptSubmit: [
+    PostToolUse: {
+      matcher: "",
+      hooks: [
         {
-          matcher: "",
-          hooks: [
-            {
-              type: "command",
-              command: `node "${promptPath}"`,
-              timeout: 5,
-            },
-          ],
+          type: "command",
+          command: `node "${toolPath}"`,
+          timeout: 5,
         },
       ],
-      PostToolUse: [
+    },
+    SessionStart: {
+      matcher: "",
+      hooks: [
         {
-          matcher: "",
-          hooks: [
-            {
-              type: "command",
-              command: `node "${toolPath}"`,
-              timeout: 5,
-            },
-          ],
+          type: "command",
+          command:
+            'node -e "process.stdout.write(\'[Context tracking active. You will receive context window usage updates before each user message and every 5 tool calls. When usage exceeds 80%, suggest /compact. Be concise when above 60%.]\')"',
+          timeout: 5,
         },
       ],
-      SessionStart: [
+    },
+    SessionEnd: {
+      matcher: "",
+      hooks: [
         {
-          matcher: "",
-          hooks: [
-            {
-              type: "command",
-              command:
-                'node -e "process.stdout.write(\'[Context tracking active. You will receive context window usage updates before each user message and every 5 tool calls. When usage exceeds 80%, suggest /compact. Be concise when above 60%.]\')"',
-              timeout: 5,
-            },
-          ],
-        },
-      ],
-      SessionEnd: [
-        {
-          matcher: "",
-          hooks: [
-            {
-              type: "command",
-              command: `node "${cleanupPath}"`,
-              timeout: 5,
-            },
-          ],
+          type: "command",
+          command: `node "${cleanupPath}"`,
+          timeout: 5,
         },
       ],
     },
   };
 
+  const ourStatusLine = {
+    type: "command",
+    command: `node "${bridgePath}"`,
+    padding: 0,
+  };
+
+  // Fingerprint: used to detect our hooks in existing config (avoids duplicates)
+  const OUR_MARKER = "claude-context-usage"; // substring present in all our hook commands
+
+  // Read existing settings (or start fresh)
+  let settings = {};
   if (fs.existsSync(SETTINGS)) {
-    // Backup existing settings
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const backupPath = `${SETTINGS}.bak.${timestamp}`;
     fs.copyFileSync(SETTINGS, backupPath);
     ok(`Backed up settings → ${backupPath}`);
 
-    // Read and merge
-    let existing = {};
     try {
-      existing = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
+      settings = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
     } catch {
-      warn("Existing settings.json was invalid — starting fresh");
+      warn("Existing settings.json was invalid JSON — starting fresh");
+      settings = {};
     }
+  }
 
-    // Deep merge: overlay our config onto existing
-    const merged = deepMerge(existing, newConfig);
-    fs.writeFileSync(SETTINGS, JSON.stringify(merged, null, 2) + "\n");
-    ok("Merged hook config into existing settings.json");
-
-    if (existing.hooks) {
-      warn(
-        "You had existing hooks — verify no entries were overwritten in:"
-      );
-      warn(`  ${SETTINGS}`);
+  // ── statusLine: set only if absent, or update if ours ────────────
+  if (settings.statusLine) {
+    const slStr = JSON.stringify(settings.statusLine);
+    if (slStr.includes(OUR_MARKER) || slStr.includes("statusline-bridge")) {
+      // Ours — update in place (may be upgrading .js → .cjs)
+      settings.statusLine = ourStatusLine;
+      ok("Updated statusLine config (ours)");
+    } else {
+      warn("statusLine already set by another tool — skipping");
+      warn(`  Existing: ${slStr.slice(0, 80)}...`);
     }
   } else {
-    fs.writeFileSync(SETTINGS, JSON.stringify(newConfig, null, 2) + "\n");
-    ok("Created new settings.json with hook config");
+    settings.statusLine = ourStatusLine;
+    ok("Added statusLine config");
   }
+
+  // ── hooks: append entries, don't replace others' hooks ───────────
+  if (!settings.hooks || typeof settings.hooks !== "object") {
+    settings.hooks = {};
+  }
+
+  // Markers that identify our hooks (match both .js and .cjs)
+  const OUR_ENTRY_MARKERS = [
+    OUR_MARKER,
+    "statusline-bridge",
+    "inject-context-on-",
+    "session-cleanup",
+    "Context tracking active",
+  ];
+
+  function isOurEntry(entry) {
+    const s = JSON.stringify(entry);
+    return OUR_ENTRY_MARKERS.some((m) => s.includes(m));
+  }
+
+  for (const [eventName, ourEntry] of Object.entries(OUR_HOOKS)) {
+    const existing = settings.hooks[eventName];
+
+    if (!existing || !Array.isArray(existing)) {
+      // No existing hooks for this event — set ours
+      settings.hooks[eventName] = [ourEntry];
+      ok(`Added ${eventName} hook`);
+      continue;
+    }
+
+    // Find index of our existing entry (if any)
+    const ourIdx = existing.findIndex(isOurEntry);
+
+    if (ourIdx >= 0) {
+      // Our entry exists — update in place
+      // Other tools' entries at other indices are untouched
+      existing[ourIdx] = ourEntry;
+      ok(`Updated ${eventName} hook (entry ${ourIdx + 1} of ${existing.length})`);
+    } else {
+      // Not present — append alongside other tools' hooks
+      existing.push(ourEntry);
+      ok(`Appended ${eventName} hook (${existing.length} total entries)`);
+    }
+  }
+
+  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n");
+  ok(`Wrote ${SETTINGS}`);
 }
 
 // ── Step 5: Smoke test ─────────────────────────────────────────────
@@ -278,9 +339,9 @@ const hookDir = fs.existsSync(path.join(HOOKS_DST, HOOK_FILES[0]))
   : HOOKS_SRC;
 
 // Test statusline bridge
-info("Testing statusline-bridge.js...");
+info("Testing statusline-bridge.cjs...");
 try {
-  const bridgeOut = runHook(path.join(hookDir, "statusline-bridge.js"), testJson);
+  const bridgeOut = runHook(path.join(hookDir, "statusline-bridge.cjs"), testJson);
   console.log(`  Output: ${bridgeOut}`);
 
   const bridgeFile = path.join(os.tmpdir(), `claude-context-usage-${testSessionId}.json`);
@@ -296,11 +357,11 @@ try {
 console.log();
 
 // Test UserPromptSubmit hook
-info("Testing inject-context-on-prompt.js...");
+info("Testing inject-context-on-prompt.cjs...");
 try {
   // Pass session_id so the hook finds the bridge file we just wrote
   const promptInput = JSON.stringify({ session_id: testSessionId });
-  const promptOut = runHook(path.join(hookDir, "inject-context-on-prompt.js"), promptInput);
+  const promptOut = runHook(path.join(hookDir, "inject-context-on-prompt.cjs"), promptInput);
   const promptData = JSON.parse(promptOut);
   ok(`Output: ${promptData.hookSpecificOutput.additionalContext}`);
 } catch (e) {
@@ -309,14 +370,14 @@ try {
 console.log();
 
 // Test PostToolUse hook (simulate 5 calls)
-info("Testing inject-context-on-tool.js (5 calls)...");
+info("Testing inject-context-on-tool.cjs (5 calls)...");
 for (let i = 1; i <= 5; i++) {
   const toolInput = JSON.stringify({
     session_id: testSessionId,
     tool_name: "Read",
   });
   try {
-    const toolOut = runHook(path.join(hookDir, "inject-context-on-tool.js"), toolInput);
+    const toolOut = runHook(path.join(hookDir, "inject-context-on-tool.cjs"), toolInput);
     if (toolOut.trim()) {
       const toolData = JSON.parse(toolOut);
       ok(`  Call #${i}: ${toolData.hookSpecificOutput.additionalContext}`);
@@ -351,32 +412,13 @@ for (const f of HOOK_FILES) {
 info(`  ${SETTINGS}`);
 console.log();
 info("To change the tool-call interval, edit EVERY_N in:");
-info(`  ${path.join(HOOKS_DST, "inject-context-on-tool.js")}`);
+info(`  ${path.join(HOOKS_DST, "inject-context-on-tool.cjs")}`);
 console.log();
 info(`To uninstall:  node ${path.join(SCRIPT_DIR, "setup.js")} --uninstall`);
 
 // ═════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═════════════════════════════════════════════════════════════════════
-
-function deepMerge(target, source) {
-  const result = { ...target };
-  for (const key of Object.keys(source)) {
-    if (
-      source[key] &&
-      typeof source[key] === "object" &&
-      !Array.isArray(source[key]) &&
-      target[key] &&
-      typeof target[key] === "object" &&
-      !Array.isArray(target[key])
-    ) {
-      result[key] = deepMerge(target[key], source[key]);
-    } else {
-      result[key] = source[key];
-    }
-  }
-  return result;
-}
 
 function runHook(scriptPath, stdinData) {
   const { execSync } = require("child_process");

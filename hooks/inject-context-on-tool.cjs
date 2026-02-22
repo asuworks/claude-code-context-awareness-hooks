@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// inject-context-on-tool.js — PostToolUse hook
+// inject-context-on-tool.cjs — PostToolUse hook
 // Injects context window usage into Claude's context every N tool calls.
 // Uses session_id to read the correct bridge file and maintain a
 // per-session counter, so concurrent sessions never collide.
+//
+// Uses .cjs extension to guarantee CommonJS mode regardless of any
+// package.json "type": "module" in the hooks directory.
 //
 // Cross-platform: works on Windows, macOS, and Linux/WSL2.
 "use strict";

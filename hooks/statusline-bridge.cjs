@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// statusline-bridge.js — Status line + token data bridge for hooks
+// statusline-bridge.cjs — Status line + token data bridge for hooks
 // Reads JSON from stdin (Claude Code StatusLine payload), writes context
 // metrics to a session-specific temp file so lifecycle hooks can read them,
 // then renders an ANSI-colored status line to stdout.
 //
 // Bridge file: {tmpdir}/claude-context-usage-{session_id}.json
 // This ensures concurrent Claude Code sessions don't overwrite each other.
+//
+// Uses .cjs extension to guarantee CommonJS mode regardless of any
+// package.json "type": "module" in the hooks directory.
 //
 // Cross-platform: works on Windows, macOS, and Linux/WSL2.
 "use strict";
@@ -102,7 +105,7 @@ function renderStatusLine(data) {
   parts.push(`${GRAY}${DIM}${model}${RST}`);
   if (branch) parts.push(`${GRAY}${DIM}${branch}${RST}`);
   parts.push(`${GRAY}${DIM}ctx ${RST}${ctxColor}${BOLD}${pct}%${RST}`);
-  parts.push(`${GRAY}${DIM}$${cost}${RST}`);
+  parts.push(`${GRAY}${DIM}$${cost.toFixed(2)}${RST}`);
 
   process.stdout.write(parts.join(SEP));
 }

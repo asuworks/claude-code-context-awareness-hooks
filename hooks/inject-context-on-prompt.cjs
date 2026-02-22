@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// inject-context-on-prompt.js — UserPromptSubmit hook
+// inject-context-on-prompt.cjs — UserPromptSubmit hook
 // Injects current context window usage into Claude's context before
-// each user message. Reads cached data written by statusline-bridge.js.
+// each user message. Reads cached data written by statusline-bridge.cjs.
 //
 // Uses session_id from the hook stdin payload to read the correct
 // bridge file, so concurrent sessions never cross-contaminate.
+//
+// Uses .cjs extension to guarantee CommonJS mode regardless of any
+// package.json "type": "module" in the hooks directory.
 //
 // Cross-platform: works on Windows, macOS, and Linux/WSL2.
 "use strict";
