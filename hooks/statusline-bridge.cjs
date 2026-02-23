@@ -104,7 +104,7 @@ function renderStatusLine(data) {
   if (dir) parts.push(`${GRAY}${DIM}${dir}${RST}`);
   parts.push(`${GRAY}${DIM}${model}${RST}`);
   if (branch) parts.push(`${GRAY}${DIM}${branch}${RST}`);
-  parts.push(`${GRAY}${DIM}ctx ${RST}${ctxColor}${BOLD}${pct}%${RST}`);
+  parts.push(`${GRAY}${DIM}ctx ${ctxColor}${BOLD}${pct}%${RST}`);
   parts.push(`${GRAY}${DIM}$${cost.toFixed(2)}${RST}`);
 
   process.stdout.write(parts.join(SEP));
